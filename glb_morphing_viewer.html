@@ -1,0 +1,269 @@
+
+<style>
+#viewer-container { width: 100%; height: 500px; background: var(--color-background-secondary); border-radius: var(--border-radius-lg); border: 0.5px solid var(--color-border-tertiary); overflow: hidden; position: relative; }
+canvas { display: block; }
+#controls { padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; background: var(--color-background-primary); border-top: 0.5px solid var(--color-border-tertiary); border-radius: 0 0 var(--border-radius-lg) var(--border-radius-lg); }
+#controls label { font-size: 13px; color: var(--color-text-secondary); }
+#status { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); text-align: center; pointer-events: none; }
+#status p { font-size: 14px; color: var(--color-text-secondary); margin: 8px 0 0; }
+#upload-area { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); text-align: center; }
+.upload-btn { background: var(--color-background-primary); border: 1.5px dashed var(--color-border-secondary); border-radius: var(--border-radius-lg); padding: 32px 40px; cursor: pointer; color: var(--color-text-secondary); font-size: 14px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.upload-btn:hover { border-color: var(--color-border-primary); color: var(--color-text-primary); }
+.morph-tag { font-size: 12px; background: var(--color-background-secondary); border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-md); padding: 3px 8px; color: var(--color-text-secondary); }
+#anim-status { font-size: 12px; color: var(--color-text-secondary); }
+</style>
+
+<h2 class="sr-only">GLB 3D 模型檢視器，支援自動變形動畫</h2>
+
+<div style="padding: 1rem 0;">
+  <div id="viewer-container">
+    <div id="upload-area">
+      <label class="upload-btn" for="glb-input">
+        <i class="ti ti-box" style="font-size:32px; color: var(--color-text-secondary);" aria-hidden="true"></i>
+        <span>點擊上傳 GLB / GLTF 模型</span>
+        <span style="font-size:12px;">或拖曳檔案到此處</span>
+      </label>
+      <input type="file" id="glb-input" accept=".glb,.gltf" style="display:none;">
+    </div>
+    <div id="status" style="display:none;">
+      <i class="ti ti-loader-2" style="font-size:28px; color:var(--color-text-secondary);" id="spin-icon" aria-hidden="true"></i>
+      <p id="status-msg">載入模型中...</p>
+    </div>
+  </div>
+  <div id="controls">
+    <label>變形速度</label>
+    <input type="range" id="morph-speed" min="0.1" max="5" step="0.1" value="1" style="width:120px;">
+    <span id="speed-val" style="font-size:13px; min-width:28px; font-weight:500;">1.0x</span>
+    <label style="margin-left:8px;">模式</label>
+    <select id="morph-mode" style="font-size:13px; padding:4px 8px; border-radius:var(--border-radius-md); border:0.5px solid var(--color-border-secondary); background:var(--color-background-primary); color:var(--color-text-primary);">
+      <option value="wave">波浪循環</option>
+      <option value="pulse">脈衝</option>
+      <option value="random">隨機跳動</option>
+      <option value="breathe">呼吸律動</option>
+    </select>
+    <button id="toggle-anim" style="margin-left:auto;"><i class="ti ti-player-pause" aria-hidden="true"></i> 暫停</button>
+    <button id="toggle-wire"><i class="ti ti-topology-star" aria-hidden="true"></i> 線框</button>
+    <span id="anim-status" style="margin-left:8px;"></span>
+  </div>
+  <div id="morph-tags" style="display:flex; flex-wrap:wrap; gap:6px; padding:8px 0;"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+const container = document.getElementById('viewer-container');
+const uploadArea = document.getElementById('upload-area');
+const statusDiv = document.getElementById('status');
+const statusMsg = document.getElementById('status-msg');
+const morphTagsDiv = document.getElementById('morph-tags');
+const animStatusEl = document.getElementById('anim-status');
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.shadowMap.enabled = true;
+container.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000);
+camera.position.set(0, 1.2, 3);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+scene.add(ambientLight);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
+dirLight.position.set(5, 8, 5);
+dirLight.castShadow = true;
+scene.add(dirLight);
+const fillLight = new THREE.DirectionalLight(0x8888ff, 0.3);
+fillLight.position.set(-5, -2, -5);
+scene.add(fillLight);
+
+function resizeRenderer() {
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+resizeRenderer();
+window.addEventListener('resize', resizeRenderer);
+
+let morphMeshes = [];
+let animating = true;
+let wireframe = false;
+let clock = new THREE.Clock();
+let currentModel = null;
+let morphNames = [];
+let morphTargetCount = 0;
+
+function getMorphValue(time, idx, mode, speed) {
+  const t = time * speed;
+  switch(mode) {
+    case 'wave': return (Math.sin(t + idx * 0.8) + 1) / 2;
+    case 'pulse': return Math.abs(Math.sin(t * 0.7 + idx * 0.5));
+    case 'random': return (Math.sin(t * 1.3 + idx * 2.1) * Math.cos(t * 0.7 + idx * 1.1) + 1) / 2;
+    case 'breathe': {
+      const b = (Math.sin(t * 0.5) + 1) / 2;
+      return idx === 0 ? b : (Math.cos(t * 0.5 + idx * 0.6) + 1) / 2;
+    }
+    default: return (Math.sin(t) + 1) / 2;
+  }
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  if (animating && morphMeshes.length > 0) {
+    const t = clock.getElapsedTime();
+    const speed = parseFloat(document.getElementById('morph-speed').value);
+    const mode = document.getElementById('morph-mode').value;
+    morphMeshes.forEach(mesh => {
+      if (mesh.morphTargetInfluences) {
+        for (let i = 0; i < mesh.morphTargetInfluences.length; i++) {
+          mesh.morphTargetInfluences[i] = getMorphValue(t, i, mode, speed);
+        }
+      }
+    });
+    if (morphTargetCount > 0) {
+      const vals = morphMeshes[0]?.morphTargetInfluences || [];
+      const names = morphNames.slice(0, vals.length);
+      animStatusEl.textContent = names.slice(0,3).map((n,i) => `${n}: ${(vals[i]*100).toFixed(0)}%`).join(' · ');
+    }
+  }
+  renderer.render(scene, camera);
+}
+animate();
+
+function loadGLB(url, name) {
+  uploadArea.style.display = 'none';
+  statusDiv.style.display = 'block';
+  statusMsg.textContent = '載入模型中...';
+  morphTagsDiv.innerHTML = '';
+  animStatusEl.textContent = '';
+
+  if (currentModel) {
+    scene.remove(currentModel);
+    currentModel = null;
+    morphMeshes = [];
+    morphNames = [];
+    morphTargetCount = 0;
+  }
+
+  const loader = new THREE.GLTFLoader();
+  loader.load(url, (gltf) => {
+    const model = gltf.scene;
+    currentModel = model;
+
+    const box = new THREE.Box3().setFromObject(model);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const scale = 2.0 / maxDim;
+    model.scale.setScalar(scale);
+    model.position.sub(center.multiplyScalar(scale));
+
+    model.traverse(node => {
+      if (node.isMesh) {
+        node.castShadow = true;
+        node.receiveShadow = true;
+        if (node.morphTargetInfluences && node.morphTargetInfluences.length > 0) {
+          morphMeshes.push(node);
+          const dict = node.morphTargetDictionary || {};
+          const keys = Object.keys(dict);
+          keys.forEach(k => { if (!morphNames.includes(k)) morphNames.push(k); });
+          if (morphNames.length === 0) {
+            for (let i = 0; i < node.morphTargetInfluences.length; i++) morphNames.push(`Target ${i+1}`);
+          }
+          morphTargetCount = Math.max(morphTargetCount, node.morphTargetInfluences.length);
+        }
+      }
+    });
+
+    scene.add(model);
+    statusDiv.style.display = 'none';
+
+    if (morphMeshes.length === 0) {
+      statusMsg.textContent = '此模型沒有 Morph Target，播放骨骼動畫...';
+      statusDiv.style.display = 'block';
+      if (gltf.animations && gltf.animations.length > 0) {
+        const mixer = new THREE.AnimationMixer(model);
+        gltf.animations.forEach(clip => mixer.clipAction(clip).play());
+        const origAnimate = animate;
+        function animateWithMixer() {
+          requestAnimationFrame(animateWithMixer);
+          const delta = clock.getDelta();
+          if (animating) mixer.update(delta);
+          controls.update();
+          renderer.render(scene, camera);
+        }
+        animateWithMixer();
+        statusDiv.style.display = 'none';
+        morphTagsDiv.innerHTML = gltf.animations.map(a =>
+          `<span class="morph-tag"><i class="ti ti-player-play" style="font-size:11px;vertical-align:-1px;" aria-hidden="true"></i> ${a.name || '動畫'}</span>`
+        ).join('');
+      } else {
+        statusMsg.textContent = '靜態模型 — 無動畫資料';
+        animStatusEl.textContent = '靜態展示';
+      }
+    } else {
+      morphTagsDiv.innerHTML = `<span class="morph-tag"><i class="ti ti-wand" style="font-size:11px;vertical-align:-1px;" aria-hidden="true"></i> ${morphMeshes.length} 個變形網格</span>` +
+        morphNames.slice(0,8).map(n => `<span class="morph-tag">${n}</span>`).join('');
+    }
+    camera.position.set(0, 1.2, 3);
+    camera.lookAt(0, 0, 0);
+  }, (progress) => {
+    if (progress.total > 0) statusMsg.textContent = `載入中 ${Math.round(progress.loaded/progress.total*100)}%...`;
+  }, (err) => {
+    statusMsg.textContent = '載入失敗，請確認檔案格式';
+    console.error(err);
+  });
+}
+
+document.getElementById('glb-input').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  loadGLB(URL.createObjectURL(file), file.name);
+});
+
+container.addEventListener('dragover', (e) => { e.preventDefault(); });
+container.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const file = e.dataTransfer.files[0];
+  if (file && (file.name.endsWith('.glb') || file.name.endsWith('.gltf'))) {
+    loadGLB(URL.createObjectURL(file), file.name);
+  }
+});
+
+document.getElementById('morph-speed').addEventListener('input', (e) => {
+  document.getElementById('speed-val').textContent = parseFloat(e.target.value).toFixed(1) + 'x';
+});
+
+document.getElementById('toggle-anim').addEventListener('click', () => {
+  animating = !animating;
+  const btn = document.getElementById('toggle-anim');
+  btn.innerHTML = animating
+    ? '<i class="ti ti-player-pause" aria-hidden="true"></i> 暫停'
+    : '<i class="ti ti-player-play" aria-hidden="true"></i> 播放';
+  if (!animating) { clock.stop(); animStatusEl.textContent = '已暫停'; }
+  else { clock.start(); }
+});
+
+document.getElementById('toggle-wire').addEventListener('click', () => {
+  wireframe = !wireframe;
+  if (currentModel) {
+    currentModel.traverse(node => {
+      if (node.isMesh && node.material) {
+        const mats = Array.isArray(node.material) ? node.material : [node.material];
+        mats.forEach(m => { m.wireframe = wireframe; });
+      }
+    });
+  }
+  const btn = document.getElementById('toggle-wire');
+  btn.style.color = wireframe ? 'var(--color-text-info)' : '';
+});
+</script>
